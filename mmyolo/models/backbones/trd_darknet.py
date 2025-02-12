@@ -213,6 +213,113 @@ class SCDown(nn.Module):
         return self.cv2(self.cv1(x))
 
  # FouriDown
+def ComplexResize(x, size, mode='bilinear', align_corners=False):
+    # Split the tensor into its real and imaginary parts
+    real_part = torch.real(x)
+    imag_part = torch.imag(x)
+    real_part_resized = F.interpolate(real_part, size=size, mode='bilinear', align_corners=False)
+    imag_part_resized = F.interpolate(imag_part, size=size, mode='bilinear', align_corners=False)
+    tensor_resized = torch.complex(real_part_resized, imag_part_resized)
+
+    return tensor_resized
+class FouriDown(nn.Module):
+
+    def __init__(self, in_channel, base_channel):
+        super(FouriDown, self).__init__()
+        self.real_fuse = nn.Sequential(nn.Conv2d(in_channel * 4, in_channel * 4, 1, 1, 0, groups=in_channel),
+                                       nn.LeakyReLU(0.1, inplace=False),
+                                       nn.Conv2d(in_channel * 4, in_channel * 4, 1, 1, 0, groups=in_channel))
+        self.imag_fuse = nn.Sequential(nn.Conv2d(in_channel * 4, in_channel * 4, 1, 1, 0, groups=in_channel),
+                                       nn.LeakyReLU(0.1, inplace=False),
+                                       nn.Conv2d(in_channel * 4, in_channel * 4, 1, 1, 0, groups=in_channel))
+        self.lrelu = nn.LeakyReLU(negative_slope=0.1, inplace=True)
+        self.Downsample = nn.Upsample(scale_factor=0.5, mode='bilinear', align_corners=False)
+        self.channel2x = nn.Conv2d(in_channel, base_channel, 1, 1)
+
+    def forward(self, x):
+
+        B, C, H, W = x.shape
+        img_fft = torch.fft.fft2(x)
+        real = img_fft.real
+        imag = img_fft.imag
+        mid_row, mid_col = img_fft.shape[2] // 4, img_fft.shape[3] // 4
+
+        # Split into 16 patches
+        img_fft_A = img_fft[:, :, :mid_row, :mid_col]
+        img_fft_2 = img_fft[:, :, :mid_row, mid_col:mid_col * 2]
+        img_fft_1 = img_fft[:, :, :mid_row, mid_col * 2:mid_col * 3]
+        img_fft_B = img_fft[:, :, :mid_row, mid_col * 3:]
+
+        img_fft_5 = img_fft[:, :, mid_row:mid_row * 2, :mid_col]
+        img_fft_6 = img_fft[:, :, mid_row:mid_row * 2, mid_col:mid_col * 2]
+        img_fft_7 = img_fft[:, :, mid_row:mid_row * 2, mid_col * 2:mid_col * 3]
+        img_fft_8 = img_fft[:, :, mid_row:mid_row * 2, mid_col * 3:]
+
+        img_fft_9 = img_fft[:, :, mid_row * 2:mid_row * 3, :mid_col]
+        img_fft_10 = img_fft[:, :, mid_row * 2:mid_row * 3, mid_col:mid_col * 2]
+        img_fft_11 = img_fft[:, :, mid_row * 2:mid_row * 3, mid_col * 2:mid_col * 3]
+        img_fft_12 = img_fft[:, :, mid_row * 2:mid_row * 3, mid_col * 3:]
+
+        img_fft_C = img_fft[:, :, mid_row * 3:, :mid_col]
+        img_fft_3 = img_fft[:, :, mid_row * 3:, mid_col:mid_col * 2]
+        img_fft_4 = img_fft[:, :, mid_row * 3:, mid_col * 2:mid_col * 3]
+        img_fft_D = img_fft[:, :, mid_row * 3:, mid_col * 3:]
+
+        # Cluster superposing groups and spectral shuffle
+        fuse_A = torch.cat((torch.cat((img_fft_A, img_fft_B), dim=-1), torch.cat((img_fft_C, img_fft_D), dim=-1)),
+                           dim=-2)
+        fuse_B = torch.cat((torch.cat((img_fft_1, img_fft_2), dim=-1), torch.cat((img_fft_4, img_fft_3), dim=-1)),
+                           dim=-2)
+        fuse_C = torch.cat((torch.cat((img_fft_9, img_fft_12), dim=-1), torch.cat((img_fft_5, img_fft_8), dim=-1)),
+                           dim=-2)
+        fuse_D = torch.cat((torch.cat((img_fft_11, img_fft_10), dim=-1), torch.cat((img_fft_7, img_fft_6), dim=-1)),
+                           dim=-2)
+
+        tensors = [fuse_A, fuse_B, fuse_C, fuse_D]
+        heights = [tensor.shape[2] for tensor in tensors]
+        widths = [tensor.shape[3] for tensor in tensors]
+        if len(set(heights)) == 1 and len(set(widths)) == 1:
+            fuse = torch.stack(tensors, dim=2)
+        else:
+            for t in tensors:
+                resized_tensors = [ComplexResize(t, size=(H // 2, W // 2), mode='bilinear', align_corners=False) for
+                                   tensor in tensors]
+                fuse = torch.stack(resized_tensors, dim=2)
+
+        # Adaptive attention
+        fuse = fuse.view(B, 4 * C, H // 2, W // 2)
+        real = fuse.real
+        imag = fuse.imag
+        real_weight = self.real_fuse(real)
+        imag_weight = self.imag_fuse(imag)
+        fuse_weight = torch.complex(real_weight, imag_weight)
+        fuse_weight = fuse_weight.view(B, C, 4, H // 2, W // 2)
+        real_sigmoid = F.softmax(fuse_weight.real + 0.25, dim=2)
+        imag_sigmoid = F.softmax(fuse_weight.imag + 0.25, dim=2)
+        fuse_weight = torch.complex(real_sigmoid, imag_sigmoid)
+        fuse = torch.complex(real, imag)
+        fuse = fuse.view(B, C, 4, H // 2, W // 2)
+        fuse = fuse * fuse_weight
+
+        # Superposing
+        fuse = fuse.sum(dim=2)
+        img = torch.abs(torch.fft.ifft2(fuse))
+        img = img + self.Downsample(x)
+        img = self.lrelu(self.channel2x(img))
+
+        return img
+
+
+def get_activation(name="silu", inplace=True):
+    if name == "silu":
+        module = nn.SiLU(inplace=inplace)
+    elif name == "relu":
+        module = nn.ReLU(inplace=inplace)
+    elif name == "lrelu":
+        module = nn.LeakyReLU(0.1, inplace=inplace)
+    else:
+        raise AttributeError("Unsupported act type: {}".format(name))
+    return module
 
 # ADown
 class BaseConv(nn.Module):
@@ -1049,6 +1156,141 @@ class YOLOv8CSPDarknetADown(BaseBackbone):
         num_blocks = make_round(num_blocks, self.deepen_factor)
         stage = []
         conv_layer = ADown(
+            in_channels,
+            out_channels,
+            )
+        stage.append(conv_layer)
+        csp_layer = CSPLayerWithTwoConv(
+            out_channels,
+            out_channels,
+            num_blocks=num_blocks,
+            add_identity=add_identity,
+            norm_cfg=self.norm_cfg,
+            act_cfg=self.act_cfg)
+        stage.append(csp_layer)
+        if use_spp:
+            spp = SPPFBottleneck(
+                out_channels,
+                out_channels,
+                kernel_sizes=5,
+                norm_cfg=self.norm_cfg,
+                act_cfg=self.act_cfg)
+            stage.append(spp)
+        return stage
+
+    def init_weights(self):
+        """Initialize the parameters."""
+        if self.init_cfg is None:
+            for m in self.modules():
+                if isinstance(m, torch.nn.Conv2d):
+                    # In order to be consistent with the source code,
+                    # reset the Conv2d initialization parameters
+                    m.reset_parameters()
+        else:
+            super().init_weights()
+@MODELS.register_module()
+class YOLOv8CSPDarknetFouriDown(BaseBackbone):
+    """CSP-Darknet backbone used in YOLOv8.
+
+    Args:
+        arch (str): Architecture of CSP-Darknet, from {P5}.
+            Defaults to P5.
+        last_stage_out_channels (int): Final layer output channel.
+            Defaults to 1024.
+        plugins (list[dict]): List of plugins for stages, each dict contains:
+            - cfg (dict, required): Cfg dict to build plugin.
+            - stages (tuple[bool], optional): Stages to apply plugin, length
+              should be same as 'num_stages'.
+        deepen_factor (float): Depth multiplier, multiply number of
+            blocks in CSP layer by this amount. Defaults to 1.0.
+        widen_factor (float): Width multiplier, multiply number of
+            channels in each layer by this amount. Defaults to 1.0.
+        input_channels (int): Number of input image channels. Defaults to: 3.
+        out_indices (Tuple[int]): Output from which stages.
+            Defaults to (2, 3, 4).
+        frozen_stages (int): Stages to be frozen (stop grad and set eval
+            mode). -1 means not DyTEDezing any parameters. Defaults to -1.
+        norm_cfg (dict): Dictionary to construct and config norm layer.
+            Defaults to dict(type='BN', requires_grad=True).
+        act_cfg (dict): Config dict for activation layer.
+            Defaults to dict(type='SiLU', inplace=True).
+        norm_eval (bool): Whether to set norm layers to eval mode, namely,
+            DyTEDeze running stats (mean and var). Note: Effect on Batch Norm
+            and its variants only. Defaults to False.
+        init_cfg (Union[dict,list[dict]], optional): Initialization config
+            dict. Defaults to None.
+
+    Example:
+        >>> from mmyolo.models import YOLOv8CSPDarknet
+        >>> import torch
+        >>> model = YOLOv8CSPDarknet()
+        >>> model.eval()
+        >>> inputs = torch.rand(1, 3, 416, 416)
+        >>> level_outputs = model(inputs)
+        >>> for level_out in level_outputs:
+        ...     print(tuple(level_out.shape))
+        ...
+        (1, 256, 52, 52)
+        (1, 512, 26, 26)
+        (1, 1024, 13, 13)
+    """
+    # From left to right:
+    # in_channels, out_channels, num_blocks, add_identity, use_spp
+    # the final out_channels will be set according to the param.
+    arch_settings = {
+        'P5': [[64, 128, 3, True, False], [128, 256, 6, True, False],
+               [256, 512, 6, True, False], [512, None, 3, True, True]],
+    }
+
+    def __init__(self,
+                 arch: str = 'P5',
+                 last_stage_out_channels: int = 1024,
+                 plugins: Union[dict, List[dict]] = None,
+                 deepen_factor: float = 1.0,
+                 widen_factor: float = 1.0,
+                 input_channels: int = 3,
+                 out_indices: Tuple[int] = (2, 3, 4),
+                 frozen_stages: int = -1,
+                 norm_cfg: ConfigType = dict(
+                     type='BN', momentum=0.03, eps=0.001),
+                 act_cfg: ConfigType = dict(type='SiLU', inplace=True),
+                 norm_eval: bool = False,
+                 init_cfg: OptMultiConfig = None):
+        self.arch_settings[arch][-1][1] = last_stage_out_channels
+        super().__init__(
+            self.arch_settings[arch],
+            deepen_factor,
+            widen_factor,
+            input_channels=input_channels,
+            out_indices=out_indices,
+            plugins=plugins,
+            frozen_stages=frozen_stages,
+            norm_cfg=norm_cfg,
+            act_cfg=act_cfg,
+            norm_eval=norm_eval,
+            init_cfg=init_cfg)
+
+    def build_stem_layer(self) -> nn.Module:
+        """Build a stem layer."""
+        return FouriDown(
+            self.input_channels,
+            make_divisible(self.arch_setting[0][0], self.widen_factor),
+            )
+
+    def build_stage_layer(self, stage_idx: int, setting: list) -> list:
+        """Build a stage layer.
+
+        Args:
+            stage_idx (int): The index of a stage layer.
+            setting (list): The architecture setting of a stage layer.
+        """
+        in_channels, out_channels, num_blocks, add_identity, use_spp = setting
+
+        in_channels = make_divisible(in_channels, self.widen_factor)
+        out_channels = make_divisible(out_channels, self.widen_factor)
+        num_blocks = make_round(num_blocks, self.deepen_factor)
+        stage = []
+        conv_layer = FouriDown(
             in_channels,
             out_channels,
             )
