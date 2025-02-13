@@ -110,8 +110,8 @@ Method | Venue | AP | AP<sub>50</sub> | AP<sub>75</sub> | Param(M) | GFLOPs
 [RFD](https://github.com/lwCVer/RFD)     | TGRS2023 | 20.2  | 34.6  | 20.0  | 3.5   | 6.3 
 [HWD](https://github.com/apple1986/HWD)     | PR2023   | 18.4  | 32.1  | 18.1  | 2.8   | 3.8 
 [SCDown](https://github.com/THU-MIG/yolov10)  | ARXIV2024| 19.5  | 33.4  | 19.2  | 2.7   | 3.8 
-[FouriDown](https://github.com/zqcrafts/FouriDown)  | NeurIPS2024| 14.3  | 25.5  | 13.9  | 2.7   | 3.7 
-[ADown](https://github.com/WongKinYiu/yolov9)  | ECCV2024 | 17.8  | 30.9  | 17.7  | 2.7   | 3.7 
+[FouriDown](https://github.com/zqcrafts/FouriDown)  | NeurIPS2024| 15.1  | 26.6  | 14.6  | 2.7   | 3.7 
+[ADown](https://github.com/WongKinYiu/yolov9)  | ECCV2024 | 18.5  | 31.8  | 18.2 | 2.7   | 3.7 
 **TRD** |      -   |**20.8**| **35.2**| **21.0**| 3.2 | 4.6 
 
 All Pretrained Models: [BaiduNetdisk Link](https://pan.baidu.com/s/1k09fQvC09lcQBtu3FvhIZA?pwd=hfb2)  extraction code: hfb2
